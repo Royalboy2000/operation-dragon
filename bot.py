@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -52,95 +53,78 @@ bot_data = {
     "from_email": os.getenv("FROM_EMAIL"),
     "stop_fetching": False,
     "fetching_thread": None,
-    "fetching_mode": None,
-    "fetch_channel": None,
     "web_server_thread": None,
     "public_url": None,
 }
 
+executor_fetch = ThreadPoolExecutor(max_workers=20)
+executor_send_message = ThreadPoolExecutor(max_workers=50)
+executor_send_email = ThreadPoolExecutor(max_workers=50)
 
-def fetch_worker():
-    """The worker function that fetches conversations."""
-    mode = bot_data.get("fetching_mode")
-    if mode == "monitor":
-        _monitor_first_page()
-    elif mode == "scrape":
-        _scrape_all_pages()
 
-def _process_and_save_conversation(conv):
+def _process_and_save_conversation(conv, fetch_channel):
     """Process a single conversation and save it to the database."""
     conv_id = conv.get("conversationId")
     email = conv.get("contact", {}).get("email")
     channel_id = conv.get("channelId")
 
-    # When fetching "all", ignore conversations from the email channel
-    if bot_data.get("fetch_channel") is None and channel_id == "email":
-        logger.info(f"Skipping email channel conversation {conv_id} during 'all' fetch.")
+    if fetch_channel is None and channel_id == "email":
         return
-
     database.add_conversation(conv_id, email, channel_id)
 
-def _monitor_first_page():
+def fetch_page(page, channel):
+    """Fetches a single page of conversations and saves them."""
+    try:
+        token = bot_data.get("api_token")
+        env_id = bot_data.get("env_id")
+        if not token or not env_id:
+            return 0
+
+        data = api_client.search_conversations(token, env_id, page=page, channel=channel)
+        conversations = data.get("data", {}).get("searchConversations", [])
+        if not conversations:
+            return 0
+
+        for conv in conversations:
+            _process_and_save_conversation(conv, channel)
+
+        return len(conversations)
+    except Exception as e:
+        logger.error(f"Error fetching page {page}: {e}")
+        return -1
+
+def _scrape_all_pages(channel):
+    """Scrapes all pages of conversations concurrently."""
+    database.clear_conversations()
+    logger.info("Starting concurrent scrape of all pages.")
+
+    initial_fetch_count = fetch_page(1, channel)
+    if initial_fetch_count < 100:
+        logger.info(f"Scraping finished. Found {initial_fetch_count} conversations on the first page.")
+        bot_data["stop_fetching"] = True
+        return
+
+    num_pages_to_scrape = 50
+    futures = [executor_fetch.submit(fetch_page, p, channel) for p in range(2, num_pages_to_scrape + 1)]
+
+    for future in as_completed(futures):
+        future.result()
+
+    logger.info(f"Scraping finished for the first {num_pages_to_scrape} pages.")
+    bot_data["stop_fetching"] = True
+
+def _monitor_first_page(channel):
     """Continuously fetches the first page of conversations."""
     while not bot_data.get("stop_fetching", False):
-        try:
-            token = bot_data.get("api_token")
-            env_id = bot_data.get("env_id")
-            channel = bot_data.get("fetch_channel")
-            if not token or not env_id:
-                logger.warning("API token or env_id not set. Stopping worker.")
-                break
-
-            logger.info(f"Monitoring page 1 for channel: {channel or 'all'}")
-            data = api_client.search_conversations(token, env_id, page=1, channel=channel)
-            conversations = data.get("data", {}).get("searchConversations", [])
-            for conv in conversations:
-                _process_and_save_conversation(conv)
-            logger.info(f"Processed {len(conversations)} conversations from page 1.")
-
-        except Exception as e:
-            logger.error(f"Error fetching conversations: {e}")
-
+        fetch_page(1, channel)
         time.sleep(10)
 
-def _scrape_all_pages():
-    """Scrapes all pages of conversations once."""
-    page = 1
-
-    while not bot_data.get("stop_fetching", False):
-        try:
-            token = bot_data.get("api_token")
-            env_id = bot_data.get("env_id")
-            channel = bot_data.get("fetch_channel")
-            if not token or not env_id:
-                logger.warning("API token or env_id not set. Stopping worker.")
-                break
-
-            logger.info(f"Scraping page {page} for channel: {channel or 'all'}")
-            data = api_client.search_conversations(token, env_id, page=page, channel=channel)
-            conversations = data.get("data", {}).get("searchConversations", [])
-
-            if not conversations:
-                logger.info("No more conversations found. Stopping scrape.")
-                break
-
-            for conv in conversations:
-                _process_and_save_conversation(conv)
-
-            if len(conversations) < 100:
-                logger.info("Last page reached. Stopping scrape.")
-                break
-
-            page += 1
-            time.sleep(1)
-
-        except Exception as e:
-            logger.error(f"Error scraping conversations: {e}")
-            break
-
-    bot_data["stop_fetching"] = True
-    logger.info("Scraping finished.")
-
+def fetch_worker(mode, channel):
+    """The worker function that fetches conversations."""
+    if mode == "monitor":
+        _monitor_first_page(channel)
+    elif mode == "scrape":
+        _scrape_all_pages(channel)
 
 async def ask_for_fetching_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Asks the user for the fetching mode."""
@@ -172,11 +156,8 @@ async def set_fetching_mode_and_start(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text("Already fetching conversations.")
         return
 
-    bot_data["fetch_channel"] = channel
-    bot_data["fetching_mode"] = mode
     bot_data["stop_fetching"] = False
-
-    thread = threading.Thread(target=fetch_worker)
+    thread = threading.Thread(target=fetch_worker, args=(mode, channel))
     thread.start()
     bot_data["fetching_thread"] = thread
 
@@ -333,11 +314,10 @@ async def select_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if recipient_type == "single":
         await query.edit_message_text(text="Please enter the conversation ID.")
         return ENTERING_CONV_ID
-    # broadcast
     elif action == "send_message":
         await query.edit_message_text(text="Please enter the message to broadcast.")
         return BROADCASTING_MESSAGE
-    else:  # send_email
+    else:
         await query.edit_message_text(text="Please enter the subject for the email broadcast.")
         return BROADCASTING_EMAIL_SUBJECT
 
@@ -349,7 +329,7 @@ async def enter_conv_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if action == "send_message":
         await update.message.reply_text("Please enter the message.")
         return ENTERING_MESSAGE
-    else:  # send_email
+    else:
         await update.message.reply_text("Please enter the subject of the email.")
         return ENTERING_SUBJECT
 
@@ -406,9 +386,7 @@ async def enter_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     to_email = conversation.get("email")
 
     if not all([token, env_id, mailbox_id, from_email, to_email]):
-        await update.message.reply_text(
-            "Configuration is not fully set or email not found for this conversation. Please check config and data."
-        )
+        await update.message.reply_text("Configuration is not fully set or email not found for this conversation.")
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -422,53 +400,55 @@ async def enter_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
-async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the broadcast message input and sends it."""
-    message_text = update.message.text
-    token = bot_data.get("api_token")
-    env_id = bot_data.get("env_id")
+def _send_message_worker(conv_id, text):
+    """Worker to send a single text message."""
+    try:
+        token = bot_data.get("api_token")
+        env_id = bot_data.get("env_id")
+        api_client.send_text_message(token, env_id, conv_id, text)
+        return True
+    except Exception as e:
+        logger.error(f"Error sending message to {conv_id}: {e}")
+        return False
 
-    if not all([token, env_id]):
-        await update.message.reply_text("Configuration is not set. Please use /set_token and /set_env_id.")
-        return ConversationHandler.END
+def _send_email_worker(conv, subject, body):
+    """Worker to send a single email."""
+    try:
+        token = bot_data.get("api_token")
+        env_id = bot_data.get("env_id")
+        mailbox_id = bot_data.get("mailbox_id")
+        from_email = bot_data.get("from_email")
+        to_email = conv["email"]
+        conv_id = conv["conversation_id"]
+        api_client.send_email(token, env_id, mailbox_id, conv_id, from_email, to_email, subject, body)
+        return True
+    except Exception as e:
+        logger.error(f"Error sending email to {to_email} ({conv_id}): {e}")
+        return False
+
+async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the broadcast message input and sends it concurrently."""
+    message_text = update.message.text
+    await update.message.reply_text("Queueing broadcast... This may take a while.")
 
     conversations = database.get_all_conversations()
     if not conversations:
         await update.message.reply_text("No conversations in database to broadcast to.")
         return ConversationHandler.END
 
-    success_count = 0
-    error_count = 0
-    for conv in conversations:
-        try:
-            api_client.send_text_message(token, env_id, conv["conversation_id"], message_text)
-            success_count += 1
-        except Exception as e:
-            logger.error(f"Error broadcasting message to {conv['conversation_id']}: {e}")
-            error_count += 1
+    futures = [executor_send_message.submit(_send_message_worker, conv["conversation_id"], message_text) for conv in conversations]
 
-    await update.message.reply_text(f"Broadcast finished. Sent: {success_count}, Failed: {error_count}.")
+    success_count = sum(f.result() for f in as_completed(futures))
+
+    await update.message.reply_text(f"Broadcast finished. Sent: {success_count}, Failed: {len(conversations) - success_count}.")
     context.user_data.clear()
     return ConversationHandler.END
 
-async def broadcast_email_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the broadcast email subject input."""
-    context.user_data["subject"] = update.message.text
-    await update.message.reply_text("Please enter the body of the email for broadcast.")
-    return BROADCASTING_EMAIL_BODY
-
 async def broadcast_email_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the broadcast email body input and sends emails."""
+    """Handles the broadcast email body input and sends emails concurrently."""
     body = update.message.text
     subject = context.user_data["subject"]
-    token = bot_data.get("api_token")
-    env_id = bot_data.get("env_id")
-    mailbox_id = bot_data.get("mailbox_id")
-    from_email = bot_data.get("from_email")
-
-    if not all([token, env_id, mailbox_id, from_email]):
-        await update.message.reply_text("Configuration is not fully set. Please check config.")
-        return ConversationHandler.END
+    await update.message.reply_text("Queueing email broadcast... This may take a while.")
 
     all_convs = database.get_all_conversations()
     email_conversations = [c for c in all_convs if c.get("email") and "zenka.co.ke" not in c.get("email")]
@@ -477,21 +457,19 @@ async def broadcast_email_body(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("No conversations with valid emails found to broadcast to.")
         return ConversationHandler.END
 
-    success_count = 0
-    error_count = 0
-    for conv in email_conversations:
-        to_email = conv["email"]
-        conv_id = conv["conversation_id"]
-        try:
-            api_client.send_email(token, env_id, mailbox_id, conv_id, from_email, to_email, subject, body)
-            success_count += 1
-        except Exception as e:
-            logger.error(f"Error broadcasting email to {to_email} ({conv_id}): {e}")
-            error_count += 1
+    futures = [executor_send_email.submit(_send_email_worker, conv, subject, body) for conv in email_conversations]
 
-    await update.message.reply_text(f"Email broadcast finished. Sent: {success_count}, Failed: {error_count}.")
+    success_count = sum(f.result() for f in as_completed(futures))
+
+    await update.message.reply_text(f"Email broadcast finished. Sent: {success_count}, Failed: {len(email_conversations) - success_count}.")
     context.user_data.clear()
     return ConversationHandler.END
+
+async def broadcast_email_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the broadcast email subject input."""
+    context.user_data["subject"] = update.message.text
+    await update.message.reply_text("Please enter the body of the email for broadcast.")
+    return BROADCASTING_EMAIL_BODY
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -527,8 +505,6 @@ async def stop_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if public_url:
         ngrok.disconnect(public_url)
         logger.info("ngrok tunnel disconnected.")
-        # Stopping the Flask thread cleanly is non-trivial.
-        # It's a daemon, so it will exit when the main program exits.
         bot_data["public_url"] = None
         bot_data["web_server_thread"] = None
         await update.effective_message.reply_text("Web view stopped.")
