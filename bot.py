@@ -55,15 +55,15 @@ bot_data = {
 }
 
 
-def fetch_worker(context: ContextTypes.DEFAULT_TYPE):
+def fetch_worker():
     """The worker function that fetches conversations."""
     mode = bot_data.get("fetching_mode")
     if mode == "monitor":
-        _monitor_first_page(context)
+        _monitor_first_page()
     elif mode == "scrape":
-        _scrape_all_pages(context)
+        _scrape_all_pages()
 
-def _monitor_first_page(context: ContextTypes.DEFAULT_TYPE):
+def _monitor_first_page():
     """Continuously fetches the first page of conversations."""
     while not bot_data.get("stop_fetching", False):
         try:
@@ -74,21 +74,23 @@ def _monitor_first_page(context: ContextTypes.DEFAULT_TYPE):
                 logger.warning("API token or env_id not set. Stopping worker.")
                 break
 
-            logger.info(f"Fetching page 1 for channel: {channel or 'all'}")
+            logger.info(f"Monitoring page 1 for channel: {channel or 'all'}")
             data = api_client.search_conversations(token, env_id, page=1, channel=channel)
             conversations = data.get("data", {}).get("searchConversations", [])
             for conv in conversations:
                 bot_data["conversations"][conv["conversationId"]] = conv
-            logger.info(f"Fetched {len(conversations)} new conversations.")
+            logger.info(f"Fetched {len(conversations)} conversations. Total unique: {len(bot_data['conversations'])}")
 
         except Exception as e:
             logger.error(f"Error fetching conversations: {e}")
 
         time.sleep(10)
 
-def _scrape_all_pages(context: ContextTypes.DEFAULT_TYPE):
+def _scrape_all_pages():
     """Scrapes all pages of conversations once."""
     page = 1
+    bot_data["conversations"] = {} # Clear previous results for a new scrape
+
     while not bot_data.get("stop_fetching", False):
         try:
             token = bot_data.get("api_token")
@@ -106,23 +108,24 @@ def _scrape_all_pages(context: ContextTypes.DEFAULT_TYPE):
                 logger.info("No more conversations found. Stopping scrape.")
                 break
 
+            num_fetched = len(conversations)
             for conv in conversations:
                 bot_data["conversations"][conv["conversationId"]] = conv
-            logger.info(f"Scraped {len(conversations)} conversations from page {page}.")
+            logger.info(f"Scraped {num_fetched} conversations from page {page}. Total unique conversations: {len(bot_data['conversations'])}")
 
-            if len(conversations) < 100:
+            if num_fetched < 100:
                 logger.info("Last page reached. Stopping scrape.")
                 break
 
             page += 1
-            time.sleep(1) # Be nice to the API
+            time.sleep(1)
 
         except Exception as e:
             logger.error(f"Error scraping conversations: {e}")
             break
 
     bot_data["stop_fetching"] = True
-    logger.info("Scraping finished.")
+    logger.info(f"Scraping finished. Total unique conversations: {len(bot_data['conversations'])}.")
 
 
 async def ask_for_fetching_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -148,7 +151,7 @@ async def set_fetching_mode_and_start(update: Update, context: ContextTypes.DEFA
     query = update.callback_query
     await query.answer()
 
-    mode = query.data.split("_")[1] # "monitor" or "scrape"
+    mode = query.data.split("_")[1]
     channel = context.user_data.get("fetch_channel")
 
     if bot_data.get("fetching_thread") and bot_data["fetching_thread"].is_alive():
@@ -159,7 +162,7 @@ async def set_fetching_mode_and_start(update: Update, context: ContextTypes.DEFA
     bot_data["fetching_mode"] = mode
     bot_data["stop_fetching"] = False
 
-    thread = threading.Thread(target=fetch_worker, args=(context,))
+    thread = threading.Thread(target=fetch_worker)
     thread.start()
     bot_data["fetching_thread"] = thread
 
@@ -526,7 +529,7 @@ def main() -> None:
     application.add_handler(CommandHandler("set_mailbox_id", set_mailbox_id))
     application.add_handler(CommandHandler("set_from_email", set_from_email))
     application.add_handler(CommandHandler("view_config", view_config))
-    application.add_handler(CommandHandler("fetch_conversations", fetch_conversations_command))
+    # application.add_handler(CommandHandler("fetch_conversations", fetch_conversations_command)) # This was broken
     application.add_handler(CommandHandler("stop_fetching", stop_fetching))
     application.add_handler(CommandHandler("status", status))
 
