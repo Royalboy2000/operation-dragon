@@ -39,10 +39,9 @@ logger = logging.getLogger(__name__)
 # Load environment variables from .env file
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8329225774:AAHEkG_fAGUGr5EC2Jz2jggZrHtavRPSC8A")
 
 # Global dicts to store config and data
-# In a real-world bot, you would use a database for persistence.
 bot_data = {
     "api_token": os.getenv("API_AUTHORIZATION_TOKEN"),
     "env_id": os.getenv("ENVIRONMENT_ID"),
@@ -75,15 +74,24 @@ def fetch_worker():
         except Exception as e:
             logger.error(f"Error fetching conversations: {e}")
 
-        time.sleep(10)  # As requested in goals.txt
+        time.sleep(10)
 
 
-async def fetch_conversations(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Starts fetching conversations in the background."""
+async def _fetch_conversations_action(update: Update, context: ContextTypes.DEFAULT_TYPE, channel: str = None):
+    """Internal action to start fetching conversations."""
     if bot_data.get("fetching_thread") and bot_data["fetching_thread"].is_alive():
-        await update.message.reply_text("Already fetching conversations.")
+        await update.effective_message.reply_text("Already fetching conversations.")
         return
 
+    bot_data["fetch_channel"] = channel
+    bot_data["stop_fetching"] = False
+    thread = threading.Thread(target=fetch_worker)
+    thread.start()
+    bot_data["fetching_thread"] = thread
+    await update.effective_message.reply_text(f"Started fetching conversations for channel: {channel or 'all'}.")
+
+async def fetch_conversations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Command to start fetching conversations."""
     channel = None
     if context.args:
         if context.args[0] in ["email", "all"]:
@@ -91,12 +99,7 @@ async def fetch_conversations(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             await update.message.reply_text("Usage: /fetch_conversations [all|email]")
             return
-    bot_data["fetch_channel"] = channel
-    bot_data["stop_fetching"] = False
-    thread = threading.Thread(target=fetch_worker)
-    thread.start()
-    bot_data["fetching_thread"] = thread
-    await update.message.reply_text(f"Started fetching conversations for channel: {channel or 'all'}.")
+    await _fetch_conversations_action(update, context, channel)
 
 
 async def stop_fetching(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -104,9 +107,9 @@ async def stop_fetching(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if bot_data.get("fetching_thread") and bot_data["fetching_thread"].is_alive():
         bot_data["stop_fetching"] = True
         bot_data["fetching_thread"].join()
-        await update.message.reply_text("Stopped fetching conversations.")
+        await update.effective_message.reply_text("Stopped fetching conversations.")
     else:
-        await update.message.reply_text("Not currently fetching conversations.")
+        await update.effective_message.reply_text("Not currently fetching conversations.")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -118,12 +121,39 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Total conversations fetched: {len(conversations)}\n"
         f"Conversations with email: {email_count}"
     )
-    await update.message.reply_text(message)
+    await update.effective_message.reply_text(message)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a message when the command /start is issued."""
-    await update.message.reply_text("Hi! I am your conversation bot. Use me to manage conversations.")
+    keyboard = [
+        [InlineKeyboardButton("Fetch (All)", callback_data="fetch_all"),
+         InlineKeyboardButton("Fetch (Email)", callback_data="fetch_email")],
+        [InlineKeyboardButton("Stop Fetching", callback_data="stop_fetching")],
+        [InlineKeyboardButton("Status", callback_data="status")],
+        [InlineKeyboardButton("Send Message/Email", callback_data="send")],
+        [InlineKeyboardButton("View Config", callback_data="view_config")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Welcome! Please choose an action:", reply_markup=reply_markup)
+
+async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles main menu button clicks."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "fetch_all":
+        await _fetch_conversations_action(update, context, channel=None)
+    elif query.data == "fetch_email":
+        await _fetch_conversations_action(update, context, channel="email")
+    elif query.data == "stop_fetching":
+        await stop_fetching(update, context)
+    elif query.data == "status":
+        await status(update, context)
+    elif query.data == "send":
+        await send_command(update.callback_query, context)
+    elif query.data == "view_config":
+        await view_config(update, context)
 
 
 async def set_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -175,7 +205,7 @@ async def view_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"Mailbox ID: {mailbox_id}\n"
         f"From Email: {from_email}"
     )
-    await update.message.reply_text(message)
+    await update.effective_message.reply_text(message)
 
 
 async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -185,7 +215,13 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         [InlineKeyboardButton("Send an email", callback_data="send_email")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("What would you like to do?", reply_markup=reply_markup)
+
+    # If called from a command, reply to the message. If from a callback, edit the message.
+    if isinstance(update, Update):
+        await update.message.reply_text("What would you like to do?", reply_markup=reply_markup)
+    else: # is a CallbackQuery
+        await update.message.edit_text("What would you like to do?", reply_markup=reply_markup)
+
     return SELECTING_ACTION
 
 
@@ -392,21 +428,20 @@ def main() -> None:
         logger.error("TELEGRAM_BOT_TOKEN not found in .env file. Please set it.")
         return
 
-    # Create the Application and pass it your bot's token.
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_token", set_token))
     application.add_handler(CommandHandler("set_env_id", set_env_id))
     application.add_handler(CommandHandler("set_mailbox_id", set_mailbox_id))
     application.add_handler(CommandHandler("set_from_email", set_from_email))
     application.add_handler(CommandHandler("view_config", view_config))
-    application.add_handler(CommandHandler("fetch_conversations", fetch_conversations))
+    application.add_handler(CommandHandler("fetch_conversations", fetch_conversations_command))
     application.add_handler(CommandHandler("stop_fetching", stop_fetching))
     application.add_handler(CommandHandler("status", status))
 
-    # Add conversation handler for sending messages/emails
+    application.add_handler(CallbackQueryHandler(main_menu_callback))
+
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("send", send_command)],
         states={
@@ -435,7 +470,6 @@ def main() -> None:
     )
     application.add_handler(conv_handler)
 
-    # Run the bot until the user presses Ctrl-C
     application.run_polling()
 
 
