@@ -1,0 +1,17 @@
+dont send any email to email that says replyto: *@zenka.co.ke
+
+i need 1 thread that grabs new conversation id by checking the first page every 10 seconds and then send out the message the user wants,
+
+you should make a telegram bot interface that says how many conversation id is received from email channel and all channels,
+
+and ask user if he wants to send message to one user or all users in all channels, or email or normal message, and then use the first thread to grab the newest 100 conversation id or ask user if he wants to scrape all conversation id and check the response if the conversation id belongs to an email and then send using the email request,and also while scraping the conversation id use another thread to still send the messages or email out at the same time,
+
+
+ill include or already included how to grab conversation id from all channels or email channel and also its response.
+
+
+the email sending it is replying to some message, but i wanna just send email to the email i grabbed.
+
+and dont forget we are not send email to one user and then stoping or one message, we are gonna send to all conversation id we find.
+
+in telegram bot also i should be able to change session id or view current session token.

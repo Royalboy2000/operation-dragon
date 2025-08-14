@@ -1,0 +1,20 @@
+POST /graphql HTTP/2
+Host: api-inbox.chatbotize.com
+Content-Length: 1678
+Sec-Ch-Ua-Platform: "Linux"
+Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJjaGF0Ym90aXplIiwic3ViIjoiMmEwNzUwZjdlYTdkNDQwMGIzZWEyZDkxMmI3OTU5OGMiLCJhdWQiOlsiY2hhdGJvdGl6ZSJdLCJleHAiOjE3NTc3NjY2MjksImlhdCI6MTc1NTE3NDYyOSwianRpIjoiMWY0MmM1NzljYWVlNDM5OTgyNmFiZTMwZGE3NGY0NWUxMDU3ZTA4M2Q0ZTE0ZTU5OTNmN2E1ODgzZGRmOTRlYyJ9.YrcPDNI20TRYDWDKu40y6r3RtiXajSvSl7rwc5cOpBwUT5rdSkA7p3yiYFJB3HoaX7-RwUwP-xMyqcfNZv1fqcR7X0oUXUwsKX7iqzCaPWE5h9N5rvsy2jgBvzOnPp8pSmQlcmJ8zSYMQlHUPLFrP_DWTZEWsgje_1kzM-vYtt-zX6x9w8X0V6ag5zpqHAU1NvIIOFu6DTejSxyGStzRoFtmLj2kF0DywjMlxVEQiSbEk8w9zXY1BlOQou1QMms9r2vJA9toBvV28gJJr_PxYX6uGuTcreq_vK451i6SujHju_P5RB-WQHBUaRzc7RS7kg_DBjCqbjZyb5HM3u7_Ng
+Accept-Language: en-US,en;q=0.9
+Sec-Ch-Ua: "Not?A_Brand";v="99", "Chromium";v="130"
+Sec-Ch-Ua-Mobile: ?0
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.70 Safari/537.36
+Accept: */*
+Content-Type: application/json
+Origin: https://app.zowie.ai
+Sec-Fetch-Site: cross-site
+Sec-Fetch-Mode: cors
+Sec-Fetch-Dest: empty
+Referer: https://app.zowie.ai/
+Accept-Encoding: gzip, deflate, br
+Priority: u=1, i
+
+{"operationName":"SearchConversations","variables":{"environmentId":"f8cab5ef2ba74c3c92bee8dc75d15e53","page":1,"sortBy":"LAST_MESSAGE_TIME","sortDirection":"DESC","entriesPerPage":100,"channelIdsFilter":[],"agentIdsFilter":[],"departmentIdsFilter":[]},"query":"query SearchConversations($page: Int!, $entriesPerPage: Int!, $environmentId: String!, $sortBy: ConversationsSortBy, $sortDirection: ConversationSortDirection, $textFilter: String, $clientFilter: String, $ticketIdFilter: String, $startFromFilter: Long, $startToFilter: Long, $lastMessageTimeFromFilter: Long, $lastMessageTimeToFilter: Long, $channelIdsFilter: [String!]!, $agentIdsFilter: [String!]!, $departmentIdsFilter: [String!]!, $quickFilter: String) {\n  searchConversations(page: $page, entriesPerPage: $entriesPerPage, environmentId: $environmentId, sortBy: $sortBy, sortDirection: $sortDirection, textFilter: $textFilter, clientFilter: $clientFilter, ticketIdFilter: $ticketIdFilter, startFromFilter: $startFromFilter, startToFilter: $startToFilter, lastMessageTimeFromFilter: $lastMessageTimeFromFilter, lastMessageTimeToFilter: $lastMessageTimeToFilter, channelIdsFilter: $channelIdsFilter, agentIdsFilter: $agentIdsFilter, departmentIdsFilter: $departmentIdsFilter, quickFilter: $quickFilter) {\n    conversationId\n    channelId\n    title\n    contact {\n      firstName\n      lastName\n      name\n      email\n      __typename\n    }\n    ticketId\n    startTime\n    lastMessageTime\n    messagesCount\n    agentIds {\n      agentId\n      firstName\n      lastName\n      email\n      __typename\n    }\n    departments {\n      id\n      name\n      __typename\n    }\n    __typename\n  }\n}\n"}
