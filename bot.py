@@ -14,8 +14,11 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from pyngrok import ngrok
 
 import api_client
+import database
+from web_server import app as flask_app
 
 # Conversation states
 (
@@ -47,11 +50,12 @@ bot_data = {
     "env_id": os.getenv("ENVIRONMENT_ID"),
     "mailbox_id": os.getenv("MAILBOX_ID"),
     "from_email": os.getenv("FROM_EMAIL"),
-    "conversations": {},
     "stop_fetching": False,
     "fetching_thread": None,
     "fetching_mode": None,
     "fetch_channel": None,
+    "web_server_thread": None,
+    "public_url": None,
 }
 
 
@@ -62,6 +66,19 @@ def fetch_worker():
         _monitor_first_page()
     elif mode == "scrape":
         _scrape_all_pages()
+
+def _process_and_save_conversation(conv):
+    """Process a single conversation and save it to the database."""
+    conv_id = conv.get("conversationId")
+    email = conv.get("contact", {}).get("email")
+    channel_id = conv.get("channelId")
+
+    # When fetching "all", ignore conversations from the email channel
+    if bot_data.get("fetch_channel") is None and channel_id == "email":
+        logger.info(f"Skipping email channel conversation {conv_id} during 'all' fetch.")
+        return
+
+    database.add_conversation(conv_id, email, channel_id)
 
 def _monitor_first_page():
     """Continuously fetches the first page of conversations."""
@@ -78,8 +95,8 @@ def _monitor_first_page():
             data = api_client.search_conversations(token, env_id, page=1, channel=channel)
             conversations = data.get("data", {}).get("searchConversations", [])
             for conv in conversations:
-                bot_data["conversations"][conv["conversationId"]] = conv
-            logger.info(f"Fetched {len(conversations)} conversations. Total unique: {len(bot_data['conversations'])}")
+                _process_and_save_conversation(conv)
+            logger.info(f"Processed {len(conversations)} conversations from page 1.")
 
         except Exception as e:
             logger.error(f"Error fetching conversations: {e}")
@@ -89,7 +106,6 @@ def _monitor_first_page():
 def _scrape_all_pages():
     """Scrapes all pages of conversations once."""
     page = 1
-    bot_data["conversations"] = {} # Clear previous results for a new scrape
 
     while not bot_data.get("stop_fetching", False):
         try:
@@ -108,12 +124,10 @@ def _scrape_all_pages():
                 logger.info("No more conversations found. Stopping scrape.")
                 break
 
-            num_fetched = len(conversations)
             for conv in conversations:
-                bot_data["conversations"][conv["conversationId"]] = conv
-            logger.info(f"Scraped {num_fetched} conversations from page {page}. Total unique conversations: {len(bot_data['conversations'])}")
+                _process_and_save_conversation(conv)
 
-            if num_fetched < 100:
+            if len(conversations) < 100:
                 logger.info("Last page reached. Stopping scrape.")
                 break
 
@@ -125,7 +139,7 @@ def _scrape_all_pages():
             break
 
     bot_data["stop_fetching"] = True
-    logger.info(f"Scraping finished. Total unique conversations: {len(bot_data['conversations'])}.")
+    logger.info("Scraping finished.")
 
 
 async def ask_for_fetching_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -180,13 +194,13 @@ async def stop_fetching(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Shows the number of fetched conversations."""
-    conversations = bot_data.get("conversations", {})
-    email_count = sum(1 for conv in conversations.values() if conv.get('contact', {}).get('email'))
+    """Shows the number of fetched conversations from the database."""
+    all_convs = database.get_all_conversations()
+    email_count = sum(1 for conv in all_convs if conv.get('email'))
 
     message = (
-        f"Total conversations fetched: {len(conversations)}\n"
-        f"Conversations with email: {email_count}"
+        f"Total conversations in DB: {len(all_convs)}\n"
+        f"Conversations with email in DB: {email_count}"
     )
     await update.effective_message.reply_text(message)
 
@@ -200,6 +214,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("Status", callback_data="status")],
         [InlineKeyboardButton("Send Message/Email", callback_data="send")],
         [InlineKeyboardButton("View Config", callback_data="view_config")],
+        [InlineKeyboardButton("View Data", callback_data="view_data")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Welcome! Please choose an action:", reply_markup=reply_markup)
@@ -217,6 +232,8 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await status(update, context)
     elif query.data == "view_config":
         await view_config(update, context)
+    elif query.data == "view_data":
+        await view_data(update, context)
 
 
 async def set_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -377,14 +394,16 @@ async def enter_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     mailbox_id = bot_data.get("mailbox_id")
     from_email = bot_data.get("from_email")
 
-    conversations = bot_data.get("conversations", {})
-    conversation = conversations.get(conv_id)
+    all_convs = database.get_all_conversations()
+    conv_map = {c['conversation_id']: c for c in all_convs}
+
+    conversation = conv_map.get(conv_id)
     if not conversation:
-        await update.message.reply_text(f"Conversation {conv_id} not found.")
+        await update.message.reply_text(f"Conversation {conv_id} not found in database.")
         context.user_data.clear()
         return ConversationHandler.END
 
-    to_email = conversation.get("contact", {}).get("email")
+    to_email = conversation.get("email")
 
     if not all([token, env_id, mailbox_id, from_email, to_email]):
         await update.message.reply_text(
@@ -413,19 +432,19 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("Configuration is not set. Please use /set_token and /set_env_id.")
         return ConversationHandler.END
 
-    conversations = bot_data.get("conversations", {}).values()
+    conversations = database.get_all_conversations()
     if not conversations:
-        await update.message.reply_text("No conversations fetched to broadcast to.")
+        await update.message.reply_text("No conversations in database to broadcast to.")
         return ConversationHandler.END
 
     success_count = 0
     error_count = 0
     for conv in conversations:
         try:
-            api_client.send_text_message(token, env_id, conv["conversationId"], message_text)
+            api_client.send_text_message(token, env_id, conv["conversation_id"], message_text)
             success_count += 1
         except Exception as e:
-            logger.error(f"Error broadcasting message to {conv['conversationId']}: {e}")
+            logger.error(f"Error broadcasting message to {conv['conversation_id']}: {e}")
             error_count += 1
 
     await update.message.reply_text(f"Broadcast finished. Sent: {success_count}, Failed: {error_count}.")
@@ -451,11 +470,8 @@ async def broadcast_email_body(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Configuration is not fully set. Please check config.")
         return ConversationHandler.END
 
-    conversations = bot_data.get("conversations", {}).values()
-    email_conversations = [
-        c for c in conversations if c.get("contact", {}).get("email")
-        and "zenka.co.ke" not in c.get("contact", {}).get("email")
-    ]
+    all_convs = database.get_all_conversations()
+    email_conversations = [c for c in all_convs if c.get("email") and "zenka.co.ke" not in c.get("email")]
 
     if not email_conversations:
         await update.message.reply_text("No conversations with valid emails found to broadcast to.")
@@ -464,8 +480,8 @@ async def broadcast_email_body(update: Update, context: ContextTypes.DEFAULT_TYP
     success_count = 0
     error_count = 0
     for conv in email_conversations:
-        to_email = conv["contact"]["email"]
-        conv_id = conv["conversationId"]
+        to_email = conv["email"]
+        conv_id = conv["conversation_id"]
         try:
             api_client.send_email(token, env_id, mailbox_id, conv_id, from_email, to_email, subject, body)
             success_count += 1
@@ -484,9 +500,50 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
+async def view_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Starts a web server to view the database content and provides a public URL."""
+    if bot_data.get("web_server_thread") and bot_data["web_server_thread"].is_alive():
+        public_url = bot_data.get("public_url")
+        await update.effective_message.reply_text(f"Web server is already running. You can view the data at: {public_url}")
+        return
+
+    web_server_thread = threading.Thread(target=flask_app.run, kwargs={"port": 5001, "host": "0.0.0.0"})
+    web_server_thread.daemon = True
+    web_server_thread.start()
+    bot_data["web_server_thread"] = web_server_thread
+
+    try:
+        public_url = ngrok.connect(5001)
+        bot_data["public_url"] = public_url.public_url
+        logger.info(f"ngrok tunnel opened at: {public_url}")
+        await update.effective_message.reply_text(f"Web server started. You can view the data at: {bot_data['public_url']}")
+    except Exception as e:
+        logger.error(f"Error starting ngrok: {e}")
+        await update.effective_message.reply_text("Could not start the web view. Please check the logs and ensure ngrok is configured.")
+
+async def stop_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stops the web server and ngrok tunnel."""
+    public_url = bot_data.get("public_url")
+    if public_url:
+        ngrok.disconnect(public_url)
+        logger.info("ngrok tunnel disconnected.")
+        # Stopping the Flask thread cleanly is non-trivial.
+        # It's a daemon, so it will exit when the main program exits.
+        bot_data["public_url"] = None
+        bot_data["web_server_thread"] = None
+        await update.effective_message.reply_text("Web view stopped.")
+    else:
+        await update.effective_message.reply_text("Web view is not running.")
+
 
 def main() -> None:
     """Start the bot."""
+    database.initialize_database()
+
+    ngrok_auth_token = os.getenv("NGROK_AUTHTOKEN")
+    if ngrok_auth_token:
+        ngrok.set_auth_token(ngrok_auth_token)
+
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not found in .env file. Please set it.")
         return
@@ -522,21 +579,18 @@ def main() -> None:
 
     application.add_handler(conv_handler)
 
-    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_token", set_token))
     application.add_handler(CommandHandler("set_env_id", set_env_id))
     application.add_handler(CommandHandler("set_mailbox_id", set_mailbox_id))
     application.add_handler(CommandHandler("set_from_email", set_from_email))
     application.add_handler(CommandHandler("view_config", view_config))
-    # application.add_handler(CommandHandler("fetch_conversations", fetch_conversations_command)) # This was broken
-    application.add_handler(CommandHandler("stop_fetching", stop_fetching))
     application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("view_data", view_data))
+    application.add_handler(CommandHandler("stop_view", stop_view))
 
-    # This handler must be added after the conversation handler to not catch the 'send' callback
-    application.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^(fetch_all|fetch_email|stop_fetching|status|view_config)$"))
+    application.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^(fetch_all|fetch_email|stop_fetching|status|view_config|view_data)$"))
     application.add_handler(CallbackQueryHandler(set_fetching_mode_and_start, pattern="^mode_"))
-
 
     application.run_polling()
 
