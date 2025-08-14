@@ -10,23 +10,55 @@ def search_conversations(token, environment_id, channel=None):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
+    # This query is taken from the user-provided `grab_conversatiodID-EMAIL.txt`
     query = """
-    query SearchConversations($page: Int!, $entriesPerPage: Int!, $environmentId: String!, $channelIdsFilter: [String!]!) {
-      searchConversations(page: 1, entriesPerPage: 100, environmentId: $environmentId, channelIdsFilter: $channelIdsFilter) {
+    query SearchConversations($page: Int!, $entriesPerPage: Int!, $environmentId: String!, $sortBy: ConversationsSortBy, $sortDirection: ConversationSortDirection, $textFilter: String, $clientFilter: String, $ticketIdFilter: String, $startFromFilter: Long, $startToFilter: Long, $lastMessageTimeFromFilter: Long, $lastMessageTimeToFilter: Long, $channelIdsFilter: [String!]!, $agentIdsFilter: [String!]!, $departmentIdsFilter: [String!]!, $quickFilter: String) {
+      searchConversations(page: $page, entriesPerPage: $entriesPerPage, environmentId: $environmentId, sortBy: $sortBy, sortDirection: $sortDirection, textFilter: $textFilter, clientFilter: $clientFilter, ticketIdFilter: $ticketIdFilter, startFromFilter: $startFromFilter, startToFilter: $startToFilter, lastMessageTimeFromFilter: $lastMessageTimeFromFilter, lastMessageTimeToFilter: $lastMessageTimeToFilter, channelIdsFilter: $channelIdsFilter, agentIdsFilter: $agentIdsFilter, departmentIdsFilter: $departmentIdsFilter, quickFilter: $quickFilter) {
         conversationId
+        channelId
+        title
         contact {
+          firstName
+          lastName
+          name
           email
+          __typename
         }
+        ticketId
+        startTime
+        lastMessageTime
+        messagesCount
+        agentIds {
+          agentId
+          firstName
+          lastName
+          email
+          __typename
+        }
+        departments {
+          id
+          name
+          __typename
+        }
+        __typename
       }
     }
     """
     variables = {
-        "page": 1,
-        "entriesPerPage": 100,
         "environmentId": environment_id,
+        "page": 1,
+        "sortBy": "LAST_MESSAGE_TIME",
+        "sortDirection": "DESC",
         "channelIdsFilter": [channel] if channel else [],
+        "entriesPerPage": 100,
+        "agentIdsFilter": [],
+        "departmentIdsFilter": [],
     }
-    json_data = {"query": query, "variables": variables}
+    json_data = {
+        "operationName": "SearchConversations",
+        "variables": variables,
+        "query": query,
+    }
     response = requests.post(API_URL, headers=headers, json=json_data)
     response.raise_for_status()
     return response.json()
@@ -53,7 +85,7 @@ def send_text_message(token, environment_id, conversation_id, text):
         "conversationId": conversation_id,
         "text": text,
     }
-    json_data = {"query": query, "variables": variables}
+    json_data = {"operationName": "SendText", "query": query, "variables": variables}
     response = requests.post(API_URL, headers=headers, json=json_data)
     response.raise_for_status()
     return response.json()
@@ -67,13 +99,13 @@ def send_email(token, environment_id, mailbox_id, conversation_id, from_email, t
         "Content-Type": "application/json",
     }
     query = """
-    mutation SendEmail($environmentId: String!, $conversationId: String!, $email: EmailInput!, $mailboxId: String!) {
-      sendEmail(environmentId: $environmentId, conversationId: $conversationId, email: $email, mailboxId: $mailboxId, startConversation: false) {
-        ... on SendEmailResult {
-          event {
-            id
-          }
+    mutation SendEmail($environmentId: String!, $conversationId: String!, $email: EmailInput!, $mailboxId: String!, $inReplyToMessageId: String, $startConversation: Boolean!, $delayMillis: Long) {
+      sendEmail(environmentId: $environmentId, conversationId: $conversationId, email: $email, mailboxId: $mailboxId, inReplyToMessageId: $inReplyToMessageId, startConversation: $startConversation, delayMillis: $delayMillis) {
+        interruptToken
+        event {
+          id
         }
+        __typename
       }
     }
     """
@@ -92,8 +124,11 @@ def send_email(token, environment_id, mailbox_id, conversation_id, from_email, t
         "conversationId": conversation_id,
         "email": email_variable,
         "mailboxId": mailbox_id,
+        "startConversation": False,
+        "inReplyToMessageId": None,
+        "delayMillis": None,
     }
-    json_data = {"query": query, "variables": variables}
+    json_data = {"operationName": "SendEmail", "query": query, "variables": variables}
     response = requests.post(API_URL, headers=headers, json=json_data)
     response.raise_for_status()
     return response.json()
