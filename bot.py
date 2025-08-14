@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables from .env file
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8329225774:AAHEkG_fAGUGr5EC2Jz2jggZrHtavRPSC8A")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # Global dicts to store config and data
 bot_data = {
@@ -138,7 +138,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Welcome! Please choose an action:", reply_markup=reply_markup)
 
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles main menu button clicks."""
+    """Handles main menu button clicks that are not conversations."""
     query = update.callback_query
     await query.answer()
 
@@ -150,8 +150,6 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await stop_fetching(update, context)
     elif query.data == "status":
         await status(update, context)
-    elif query.data == "send":
-        await send_command(update.callback_query, context)
     elif query.data == "view_config":
         await view_config(update, context)
 
@@ -216,11 +214,12 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # If called from a command, reply to the message. If from a callback, edit the message.
-    if isinstance(update, Update):
-        await update.message.reply_text("What would you like to do?", reply_markup=reply_markup)
-    else: # is a CallbackQuery
-        await update.message.edit_text("What would you like to do?", reply_markup=reply_markup)
+    if update.callback_query:
+        await update.callback_query.answer()
+        # Replying to the original message to start a new flow
+        await update.callback_query.message.reply_text("Let's send something! What would you like to do?", reply_markup=reply_markup)
+    else:
+        await update.message.reply_text("Let's send something! What would you like to do?", reply_markup=reply_markup)
 
     return SELECTING_ACTION
 
@@ -430,20 +429,8 @@ def main() -> None:
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("set_token", set_token))
-    application.add_handler(CommandHandler("set_env_id", set_env_id))
-    application.add_handler(CommandHandler("set_mailbox_id", set_mailbox_id))
-    application.add_handler(CommandHandler("set_from_email", set_from_email))
-    application.add_handler(CommandHandler("view_config", view_config))
-    application.add_handler(CommandHandler("fetch_conversations", fetch_conversations_command))
-    application.add_handler(CommandHandler("stop_fetching", stop_fetching))
-    application.add_handler(CommandHandler("status", status))
-
-    application.add_handler(CallbackQueryHandler(main_menu_callback))
-
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("send", send_command)],
+        entry_points=[CommandHandler("send", send_command), CallbackQueryHandler(send_command, pattern="^send$")],
         states={
             SELECTING_ACTION: [
                 CallbackQueryHandler(select_action, pattern="^send_message$|^send_email$")
@@ -468,7 +455,23 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False,
     )
+
     application.add_handler(conv_handler)
+
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("set_token", set_token))
+    application.add_handler(CommandHandler("set_env_id", set_env_id))
+    application.add_handler(CommandHandler("set_mailbox_id", set_mailbox_id))
+    application.add_handler(CommandHandler("set_from_email", set_from_email))
+    application.add_handler(CommandHandler("view_config", view_config))
+    application.add_handler(CommandHandler("fetch_conversations", fetch_conversations_command))
+    application.add_handler(CommandHandler("stop_fetching", stop_fetching))
+    application.add_handler(CommandHandler("status", status))
+
+    # This handler must be added after the conversation handler to not catch the 'send' callback
+    application.add_handler(CallbackQueryHandler(main_menu_callback))
+
 
     application.run_polling()
 
