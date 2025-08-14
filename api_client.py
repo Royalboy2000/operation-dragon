@@ -2,7 +2,7 @@ import requests
 
 API_URL = "https://api-inbox.chatbotize.com/graphql"
 
-def search_conversations(token, environment_id, channel=None):
+def search_conversations(token, environment_id, page=1, channel=None):
     """
     Searches for conversations, with an optional filter for the channel.
     """
@@ -46,7 +46,7 @@ def search_conversations(token, environment_id, channel=None):
     """
     variables = {
         "environmentId": environment_id,
-        "page": 1,
+        "page": page,
         "sortBy": "LAST_MESSAGE_TIME",
         "sortDirection": "DESC",
         "channelIdsFilter": [channel] if channel else [],

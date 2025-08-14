@@ -50,11 +50,21 @@ bot_data = {
     "conversations": {},
     "stop_fetching": False,
     "fetching_thread": None,
+    "fetching_mode": None,
+    "fetch_channel": None,
 }
 
 
-def fetch_worker():
+def fetch_worker(context: ContextTypes.DEFAULT_TYPE):
     """The worker function that fetches conversations."""
+    mode = bot_data.get("fetching_mode")
+    if mode == "monitor":
+        _monitor_first_page(context)
+    elif mode == "scrape":
+        _scrape_all_pages(context)
+
+def _monitor_first_page(context: ContextTypes.DEFAULT_TYPE):
+    """Continuously fetches the first page of conversations."""
     while not bot_data.get("stop_fetching", False):
         try:
             token = bot_data.get("api_token")
@@ -64,42 +74,96 @@ def fetch_worker():
                 logger.warning("API token or env_id not set. Stopping worker.")
                 break
 
-            logger.info(f"Fetching conversations for channel: {channel or 'all'}")
-            data = api_client.search_conversations(token, env_id, channel)
+            logger.info(f"Fetching page 1 for channel: {channel or 'all'}")
+            data = api_client.search_conversations(token, env_id, page=1, channel=channel)
             conversations = data.get("data", {}).get("searchConversations", [])
             for conv in conversations:
                 bot_data["conversations"][conv["conversationId"]] = conv
-            logger.info(f"Fetched {len(conversations)} conversations.")
+            logger.info(f"Fetched {len(conversations)} new conversations.")
 
         except Exception as e:
             logger.error(f"Error fetching conversations: {e}")
 
         time.sleep(10)
 
+def _scrape_all_pages(context: ContextTypes.DEFAULT_TYPE):
+    """Scrapes all pages of conversations once."""
+    page = 1
+    while not bot_data.get("stop_fetching", False):
+        try:
+            token = bot_data.get("api_token")
+            env_id = bot_data.get("env_id")
+            channel = bot_data.get("fetch_channel")
+            if not token or not env_id:
+                logger.warning("API token or env_id not set. Stopping worker.")
+                break
 
-async def _fetch_conversations_action(update: Update, context: ContextTypes.DEFAULT_TYPE, channel: str = None):
-    """Internal action to start fetching conversations."""
+            logger.info(f"Scraping page {page} for channel: {channel or 'all'}")
+            data = api_client.search_conversations(token, env_id, page=page, channel=channel)
+            conversations = data.get("data", {}).get("searchConversations", [])
+
+            if not conversations:
+                logger.info("No more conversations found. Stopping scrape.")
+                break
+
+            for conv in conversations:
+                bot_data["conversations"][conv["conversationId"]] = conv
+            logger.info(f"Scraped {len(conversations)} conversations from page {page}.")
+
+            if len(conversations) < 100:
+                logger.info("Last page reached. Stopping scrape.")
+                break
+
+            page += 1
+            time.sleep(1) # Be nice to the API
+
+        except Exception as e:
+            logger.error(f"Error scraping conversations: {e}")
+            break
+
+    bot_data["stop_fetching"] = True
+    logger.info("Scraping finished.")
+
+
+async def ask_for_fetching_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Asks the user for the fetching mode."""
+    query = update.callback_query
+    await query.answer()
+
+    channel = None
+    if query.data == "fetch_email":
+        channel = "email"
+
+    context.user_data["fetch_channel"] = channel
+
+    keyboard = [
+        [InlineKeyboardButton("Monitor First Page", callback_data="mode_monitor")],
+        [InlineKeyboardButton("Scrape All Pages", callback_data="mode_scrape")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("Please choose a fetching mode:", reply_markup=reply_markup)
+
+async def set_fetching_mode_and_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sets the fetching mode and starts the worker."""
+    query = update.callback_query
+    await query.answer()
+
+    mode = query.data.split("_")[1] # "monitor" or "scrape"
+    channel = context.user_data.get("fetch_channel")
+
     if bot_data.get("fetching_thread") and bot_data["fetching_thread"].is_alive():
-        await update.effective_message.reply_text("Already fetching conversations.")
+        await query.edit_message_text("Already fetching conversations.")
         return
 
     bot_data["fetch_channel"] = channel
+    bot_data["fetching_mode"] = mode
     bot_data["stop_fetching"] = False
-    thread = threading.Thread(target=fetch_worker)
+
+    thread = threading.Thread(target=fetch_worker, args=(context,))
     thread.start()
     bot_data["fetching_thread"] = thread
-    await update.effective_message.reply_text(f"Started fetching conversations for channel: {channel or 'all'}.")
 
-async def fetch_conversations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Command to start fetching conversations."""
-    channel = None
-    if context.args:
-        if context.args[0] in ["email", "all"]:
-            channel = context.args[0] if context.args[0] != "all" else None
-        else:
-            await update.message.reply_text("Usage: /fetch_conversations [all|email]")
-            return
-    await _fetch_conversations_action(update, context, channel)
+    await query.edit_message_text(f"Started fetching conversations for channel '{channel or 'all'}' in '{mode}' mode.")
 
 
 async def stop_fetching(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -138,14 +202,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Welcome! Please choose an action:", reply_markup=reply_markup)
 
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles main menu button clicks that are not conversations."""
+    """Handles main menu button clicks."""
     query = update.callback_query
     await query.answer()
 
-    if query.data == "fetch_all":
-        await _fetch_conversations_action(update, context, channel=None)
-    elif query.data == "fetch_email":
-        await _fetch_conversations_action(update, context, channel="email")
+    if query.data in ["fetch_all", "fetch_email"]:
+        await ask_for_fetching_mode(update, context)
     elif query.data == "stop_fetching":
         await stop_fetching(update, context)
     elif query.data == "status":
@@ -216,7 +278,6 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     if update.callback_query:
         await update.callback_query.answer()
-        # Replying to the original message to start a new flow
         await update.callback_query.message.reply_text("Let's send something! What would you like to do?", reply_markup=reply_markup)
     else:
         await update.message.reply_text("Let's send something! What would you like to do?", reply_markup=reply_markup)
@@ -470,7 +531,8 @@ def main() -> None:
     application.add_handler(CommandHandler("status", status))
 
     # This handler must be added after the conversation handler to not catch the 'send' callback
-    application.add_handler(CallbackQueryHandler(main_menu_callback))
+    application.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^(fetch_all|fetch_email|stop_fetching|status|view_config)$"))
+    application.add_handler(CallbackQueryHandler(set_fetching_mode_and_start, pattern="^mode_"))
 
 
     application.run_polling()
