@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Saved Conversations</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .container { max-width: 1200px; margin: auto; }
+        .no-data { text-align: center; color: #888; margin-top: 2em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Saved Conversations</h1>
+        {% if conversations %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Conversation ID</th>
+                        <th>Email</th>
+                        <th>Channel ID</th>
+                        <th>Saved At</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for conv in conversations %}
+                    <tr>
+                        <td>{{ conv.conversation_id }}</td>
+                        <td>{{ conv.email or 'N/A' }}</td>
+                        <td>{{ conv.channel_id or 'N/A' }}</td>
+                        <td>{{ conv.created_at }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p class="no-data">No conversations found in the database.</p>
+        {% endif %}
+    </div>
+</body>
+</html>
