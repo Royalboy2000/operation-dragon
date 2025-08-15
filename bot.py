@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import time
+import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
@@ -57,9 +58,9 @@ bot_data = {
     "public_url": None,
 }
 
-executor_fetch = ThreadPoolExecutor(max_workers=20)
-executor_send_message = ThreadPoolExecutor(max_workers=50)
-executor_send_email = ThreadPoolExecutor(max_workers=50)
+executor_fetch = ThreadPoolExecutor(max_workers=100)
+executor_send_message = ThreadPoolExecutor(max_workers=100)
+executor_send_email = ThreadPoolExecutor(max_workers=100)
 
 
 def _process_and_save_conversation(conv, fetch_channel):
@@ -94,24 +95,60 @@ def fetch_page(page, channel):
         return -1
 
 def _scrape_all_pages(channel):
-    """Scrapes all pages of conversations concurrently."""
+    """Scrapes all pages of conversations concurrently using a producer-consumer model."""
     database.clear_conversations()
-    logger.info("Starting concurrent scrape of all pages.")
+    logger.info("Starting true unlimited concurrent scrape.")
 
-    initial_fetch_count = fetch_page(1, channel)
-    if initial_fetch_count < 100:
-        logger.info(f"Scraping finished. Found {initial_fetch_count} conversations on the first page.")
-        bot_data["stop_fetching"] = True
-        return
+    page_queue = queue.Queue()
+    stop_event = threading.Event()
 
-    num_pages_to_scrape = 50
-    futures = [executor_fetch.submit(fetch_page, p, channel) for p in range(2, num_pages_to_scrape + 1)]
+    # Start with a batch of pages
+    for i in range(1, 101):
+        page_queue.put(i)
 
+    def consumer():
+        """Consumes page numbers from the queue, fetches them, and adds more pages if necessary."""
+        while not stop_event.is_set():
+            try:
+                page = page_queue.get_nowait()
+
+                num_fetched = fetch_page(page, channel)
+
+                if num_fetched == 100:
+                    # This page was full, so there's probably a next page.
+                    # Let's add the page 100 pages from now to the queue.
+                    # This creates a rolling window of 100 concurrent requests.
+                    next_page = page + 100
+                    page_queue.put(next_page)
+                elif num_fetched == 0:
+                    # This page was empty, we are likely at the end.
+                    # This is a heuristic to stop.
+                    stop_event.set()
+
+                page_queue.task_done()
+            except queue.Empty:
+                # No more pages in the queue, this worker can stop.
+                break
+            except Exception as e:
+                logger.error(f"Error in consumer thread: {e}")
+                break
+
+    # Start consumers in the thread pool
+    futures = [executor_fetch.submit(consumer) for _ in range(100)]
+
+    # Wait for all futures to complete
     for future in as_completed(futures):
-        future.result()
+        try:
+            future.result()
+        except Exception as e:
+            logger.error(f"A consumer thread raised an exception: {e}")
 
-    logger.info(f"Scraping finished for the first {num_pages_to_scrape} pages.")
+    # Final check to ensure the queue is empty
+    page_queue.join()
+
+    logger.info("Scraping finished.")
     bot_data["stop_fetching"] = True
+
 
 def _monitor_first_page(channel):
     """Continuously fetches the first page of conversations."""
