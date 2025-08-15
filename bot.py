@@ -58,9 +58,9 @@ bot_data = {
     "public_url": None,
 }
 
-executor_fetch = ThreadPoolExecutor(max_workers=200)
-executor_send_message = ThreadPoolExecutor(max_workers=200)
-executor_send_email = ThreadPoolExecutor(max_workers=200)
+executor_fetch = ThreadPoolExecutor(max_workers=1000)
+executor_send_message = ThreadPoolExecutor(max_workers=1000)
+executor_send_email = ThreadPoolExecutor(max_workers=1000)
 
 
 def _process_and_save_conversation(conv, fetch_channel):
