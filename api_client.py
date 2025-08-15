@@ -10,7 +10,6 @@ def search_conversations(token, environment_id, page=1, channel=None):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    # This query is taken from the user-provided `grab_conversatiodID-EMAIL.txt`
     query = """
     query SearchConversations($page: Int!, $entriesPerPage: Int!, $environmentId: String!, $sortBy: ConversationsSortBy, $sortDirection: ConversationSortDirection, $textFilter: String, $clientFilter: String, $ticketIdFilter: String, $startFromFilter: Long, $startToFilter: Long, $lastMessageTimeFromFilter: Long, $lastMessageTimeToFilter: Long, $channelIdsFilter: [String!]!, $agentIdsFilter: [String!]!, $departmentIdsFilter: [String!]!, $quickFilter: String) {
       searchConversations(page: $page, entriesPerPage: $entriesPerPage, environmentId: $environmentId, sortBy: $sortBy, sortDirection: $sortDirection, textFilter: $textFilter, clientFilter: $clientFilter, ticketIdFilter: $ticketIdFilter, startFromFilter: $startFromFilter, startToFilter: $startToFilter, lastMessageTimeFromFilter: $lastMessageTimeFromFilter, lastMessageTimeToFilter: $lastMessageTimeToFilter, channelIdsFilter: $channelIdsFilter, agentIdsFilter: $agentIdsFilter, departmentIdsFilter: $departmentIdsFilter, quickFilter: $quickFilter) {
@@ -59,7 +58,7 @@ def search_conversations(token, environment_id, page=1, channel=None):
         "variables": variables,
         "query": query,
     }
-    response = requests.post(API_URL, headers=headers, json=json_data)
+    response = requests.post(API_URL, headers=headers, json=json_data, timeout=10)
     response.raise_for_status()
     return response.json()
 
@@ -86,7 +85,7 @@ def send_text_message(token, environment_id, conversation_id, text):
         "text": text,
     }
     json_data = {"operationName": "SendText", "query": query, "variables": variables}
-    response = requests.post(API_URL, headers=headers, json=json_data)
+    response = requests.post(API_URL, headers=headers, json=json_data, timeout=10)
     response.raise_for_status()
     return response.json()
 
@@ -129,6 +128,6 @@ def send_email(token, environment_id, mailbox_id, conversation_id, from_email, t
         "delayMillis": None,
     }
     json_data = {"operationName": "SendEmail", "query": query, "variables": variables}
-    response = requests.post(API_URL, headers=headers, json=json_data)
+    response = requests.post(API_URL, headers=headers, json=json_data, timeout=10)
     response.raise_for_status()
     return response.json()
